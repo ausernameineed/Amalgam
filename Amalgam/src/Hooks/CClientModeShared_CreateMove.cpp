@@ -1,4 +1,5 @@
 #include "../SDK/SDK.h"
+
 #include "../Features/Aimbot/Aimbot.h"
 #include "../Features/Backtrack/Backtrack.h"
 #include "../Features/CritHack/CritHack.h"
@@ -8,7 +9,7 @@
 #include "../Features/NoSpread/NoSpreadHitscan/NoSpreadHitscan.h"
 #include "../Features/PacketManip/PacketManip.h"
 #include "../Features/Resolver/Resolver.h"
-#include "../Features/TickHandler/TickHandler.h"
+#include "../Features/Ticks/Ticks.h"
 #include "../Features/Visuals/Visuals.h"
 #include "../Features/Visuals/FakeAngle/FakeAngle.h"
 #include "../Features/Spectate/Spectate.h"
@@ -169,16 +170,15 @@ MAKE_HOOK(CClientModeShared_CreateMove, U::Memory.GetVFunc(I::ClientModeShared, 
 	// run features
 	F::Spectate.CreateMove(pLocal, pCmd);
 	F::Misc.RunPre(pLocal, pCmd);
-	F::Backtrack.Run(pCmd);
 
 	F::EnginePrediction.Start(pLocal, pCmd);
 	F::Aimbot.Run(pLocal, pWeapon, pCmd);
 	F::EnginePrediction.End(pLocal, pCmd);
 
 	F::CritHack.Run(pLocal, pWeapon, pCmd);
+	F::NoSpread.Run(pLocal, pWeapon, pCmd);
 	F::Misc.RunPost(pLocal, pCmd, *pSendPacket);
 	F::PacketManip.Run(pLocal, pWeapon, pCmd, pSendPacket);
-	F::NoSpread.Run(pLocal, pWeapon, pCmd);
 	F::Resolver.CreateMove(pLocal);
 	F::Visuals.CreateMove(pLocal, pWeapon);
 

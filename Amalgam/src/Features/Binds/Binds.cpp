@@ -56,7 +56,7 @@ static inline void GetBinds(int iParent, CTFPlayer* pLocal, CTFWeaponBase* pWeap
 			case BindEnum::KeyEnum::DoubleClick: bKey = U::KeyHandler.Double(tBind.m_iKey, false, &tBind.m_tKeyStorage); break;
 			}
 			const bool bShouldUse = !I::EngineVGui->IsGameUIVisible() && (!I::MatSystemSurface->IsCursorVisible() || I::EngineClient->IsPlayingDemo())
-				|| F::Menu.m_bIsOpen && !ImGui::GetIO().WantTextInput && !F::Menu.m_bInKeybind; // allow in menu
+				|| F::Menu.m_bIsOpen && !ImGui::GetIO().WantTextInput && !F::Menu.m_bInKeybind && (!F::Menu.m_bWindowHovered || tBind.m_iKey != VK_LBUTTON && tBind.m_iKey != VK_RBUTTON); // allow in menu
 			bKey = bShouldUse && bKey;
 
 			switch (tBind.m_iInfo)
@@ -224,6 +224,17 @@ void CBinds::RemoveBind(int iBind, bool bForce)
 		}
 	}
 
+	std::vector<int> vErases = {};
+	std::function<void(int)> searchBinds = [&](int iIndex)
+		{
+			for (auto it = m_vBinds.begin(); it < m_vBinds.end(); it++)
+			{
+				int iIndex2 = std::distance(m_vBinds.begin(), it);
+				if (iIndex == it->m_iParent && iIndex != iIndex2)
+					searchBinds(iIndex2);
+			}
+			vErases.push_back(iIndex);
+		};
 	auto removeBind = [&](int iIndex)
 		{
 			if (iIndex < m_vBinds.size())
@@ -250,17 +261,13 @@ void CBinds::RemoveBind(int iBind, bool bForce)
 				else RemoveT(WindowBox_t, iIndex)
 			}
 		};
-
-	std::function<void(int)> searchBinds = [&](int iIndex)
-		{
-			for (auto it = m_vBinds.begin(); it < m_vBinds.end(); it++)
-			{
-				if (iIndex == it->m_iParent)
-					searchBinds(std::distance(m_vBinds.begin(), it));
-			}
-			removeBind(iIndex);
-		};
 	searchBinds(iBind);
+	std::sort(vErases.begin(), vErases.end(), [&](const int a, const int b) -> bool
+		{
+			return a > b;
+		});
+	for (auto iIndex : vErases)
+		removeBind(iIndex);
 }
 
 int CBinds::GetParent(int iBind)

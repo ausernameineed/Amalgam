@@ -2,7 +2,7 @@
 
 #include "../Aimbot.h"
 #include "../../Simulation/MovementSimulation/MovementSimulation.h"
-#include "../../TickHandler/TickHandler.h"
+#include "../../Ticks/Ticks.h"
 #include "../../Visuals/Visuals.h"
 
 std::vector<Target_t> CAimbotMelee::GetTargets(CTFPlayer* pLocal, CTFWeaponBase* pWeapon)
@@ -110,8 +110,8 @@ int CAimbotMelee::GetSwingTime(CTFWeaponBase* pWeapon)
 }
 
 void CAimbotMelee::SimulatePlayers(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, std::vector<Target_t> vTargets,
-								   Vec3& vEyePos, std::unordered_map<int, std::deque<TickRecord>>& pRecordMap,
-								   std::unordered_map<int, std::deque<Vec3>>& mPaths)
+								   Vec3& vEyePos, std::unordered_map<int, std::deque<TickRecord>>& mRecordMap,
+								   std::unordered_map<int, std::vector<Vec3>>& mPaths)
 {
 	// swing prediction / auto warp
 	const int iSwingTicks = GetSwingTime(pWeapon);
@@ -144,10 +144,10 @@ void CAimbotMelee::SimulatePlayers(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, st
 
 					F::MoveSim.RunTick(tStorage);
 					if (!tStorage.m_bFailed)
-						pRecordMap[tTarget.m_pEntity->entindex()].emplace_front(
+						mRecordMap[tTarget.m_pEntity->entindex()].emplace_front(
 							!Vars::Aimbot::Melee::SwingPredictLag.Value || tStorage.m_bPredictNetworked ? tTarget.m_pEntity->m_flSimulationTime() + TICKS_TO_TIME(i + 1) : 0.f,
-							BoneMatrix(),
-							Vars::Aimbot::Melee::SwingPredictLag.Value ? tStorage.m_vPredictedOrigin : tStorage.m_MoveData.m_vecAbsOrigin
+							Vars::Aimbot::Melee::SwingPredictLag.Value ? tStorage.m_vPredictedOrigin : tStorage.m_MoveData.m_vecAbsOrigin,
+							tTarget.m_pEntity->m_vecMins(), tTarget.m_pEntity->m_vecMaxs()
 						);
 				}
 			}
@@ -213,7 +213,7 @@ bool CAimbotMelee::CanBackstab(CBaseEntity* pTarget, CTFPlayer* pLocal, Vec3 vEy
 		return false;
 
 	float flTolerance = 0.0625f;
-	float flExtra = 2.f * flTolerance / flDist; // account for origin tolerance
+	float flExtra = 2.f * flTolerance / flDist; // account for origin compression
 
 	float flPosVsTargetViewMinDot = 0.f + 0.0031f + flExtra;
 	float flPosVsOwnerViewMinDot = 0.5f + flExtra;
@@ -268,67 +268,42 @@ int CAimbotMelee::CanHit(Target_t& tTarget, CTFPlayer* pLocal, CTFWeaponBase* pW
 	Vec3 vSwingMins = { -flHull, -flHull, -flHull };
 	Vec3 vSwingMaxs = { flHull, flHull, flHull };
 
-	std::deque<TickRecord> vRecords;
+	std::vector<TickRecord*> vRecords = {};
+	if (F::Backtrack.GetRecords(tTarget.m_pEntity, vRecords))
 	{
-		auto pRecords = F::Backtrack.GetRecords(tTarget.m_pEntity);
-		if (pRecords)
+		if (!vRecords.empty())
 		{
-			if (Vars::Backtrack::Enabled.Value)
-				vRecords = *pRecords;
-			else
-			{
-				vRecords = F::Backtrack.GetValidRecords(pRecords, pLocal);
-				if (!vRecords.empty())
-					vRecords = { vRecords.front() };
-			}
-
-			if (vRecords.empty())
-				return false;
+			for (auto& tRecord : vSimRecords)
+				vRecords.push_back(&tRecord);
+			vRecords = F::Backtrack.GetValidRecords(vRecords, pLocal, true, -TICKS_TO_TIME(vSimRecords.size()));
 		}
-		if (!pRecords || vRecords.empty())
-		{
-			if (auto pBones = H::Entities.GetBones(tTarget.m_pEntity->entindex()))
-				vRecords.emplace_front(tTarget.m_pEntity->m_flSimulationTime(), *reinterpret_cast<BoneMatrix*>(pBones), tTarget.m_pEntity->m_vecOrigin(),
-					tTarget.m_pEntity->m_vecMins(), tTarget.m_pEntity->m_vecMaxs());
-			else
-			{
-				matrix3x4 aBones[MAXSTUDIOBONES];
-				if (!tTarget.m_pEntity->SetupBones(aBones, MAXSTUDIOBONES, BONE_USED_BY_ANYTHING, tTarget.m_pEntity->m_flSimulationTime()))
-					return false;
-
-				vRecords.emplace_front(tTarget.m_pEntity->m_flSimulationTime(), *reinterpret_cast<BoneMatrix*>(&aBones), tTarget.m_pEntity->m_vecOrigin(),
-					tTarget.m_pEntity->m_vecMins(), tTarget.m_pEntity->m_vecMaxs());
-			}
-		}
+		if (vRecords.empty())
+			return false;
 	}
-	if (!vSimRecords.empty())
+	else
 	{
-		for (TickRecord& tRecord : vSimRecords)
-		{
-			vRecords.pop_back();
-			vRecords.emplace_front(tRecord.m_flSimTime, BoneMatrix(), tRecord.m_vOrigin, tTarget.m_pEntity->m_vecMins(), tTarget.m_pEntity->m_vecMaxs());
-		}
-		for (TickRecord& tRecord : vRecords)
-			tRecord.m_flSimTime -= TICKS_TO_TIME(vSimRecords.size());
+		matrix3x4 aBones[MAXSTUDIOBONES];
+		if (!tTarget.m_pEntity->SetupBones(aBones, MAXSTUDIOBONES, BONE_USED_BY_ANYTHING, tTarget.m_pEntity->m_flSimulationTime()))
+			return false;
+
+		F::Backtrack.m_tRecord = { tTarget.m_pEntity->m_flSimulationTime(), tTarget.m_pEntity->m_vecOrigin(), tTarget.m_pEntity->m_vecMins(), tTarget.m_pEntity->m_vecMaxs(), *reinterpret_cast<BoneMatrix*>(&aBones) };
+		vRecords = { &F::Backtrack.m_tRecord };
 	}
-	vRecords = tTarget.m_iTargetType == TargetEnum::Player ? F::Backtrack.GetValidRecords(&vRecords, pLocal, true) : vRecords;
-	if (!Vars::Backtrack::Enabled.Value && !vRecords.empty())
-		vRecords = { vRecords.front() };
 
 	CGameTrace trace = {};
 	CTraceFilterHitscan filter = {}; filter.pSkip = pLocal;
-	for (auto& tRecord : vRecords)
+	for (auto pRecord : vRecords)
 	{
 		Vec3 vRestoreOrigin = tTarget.m_pEntity->GetAbsOrigin();
 		Vec3 vRestoreMins = tTarget.m_pEntity->m_vecMins();
 		Vec3 vRestoreMaxs = tTarget.m_pEntity->m_vecMaxs();
 
-		tTarget.m_pEntity->SetAbsOrigin(tRecord.m_vOrigin);
-		tTarget.m_pEntity->m_vecMins() = tRecord.m_vMins + 0.125f; // account for origin tolerance
-		tTarget.m_pEntity->m_vecMaxs() = tRecord.m_vMaxs - 0.125f;
+		tTarget.m_pEntity->SetAbsOrigin(pRecord->m_vOrigin);
+		tTarget.m_pEntity->m_vecMins() = pRecord->m_vMins + 0.125f; // account for origin compression
+		tTarget.m_pEntity->m_vecMaxs() = pRecord->m_vMaxs - 0.125f;
 
-		Vec3 vDiff = { 0, 0, std::clamp(vEyePos.z - tRecord.m_vOrigin.z, tTarget.m_pEntity->m_vecMins().z, tTarget.m_pEntity->m_vecMaxs().z) };
-		tTarget.m_vPos = tRecord.m_vOrigin + vDiff;
+		Vec3 vDiff = { 0, 0, std::clamp(vEyePos.z - pRecord->m_vOrigin.z, tTarget.m_pEntity->m_vecMins().z, tTarget.m_pEntity->m_vecMaxs().z) };
+		tTarget.m_vPos = pRecord->m_vOrigin + vDiff;
 		Aim(G::CurrentUserCmd->viewangles, Math::CalcAngle(vEyePos, tTarget.m_vPos), tTarget.m_vAngleTo);
 
 		Vec3 vForward; Math::AngleVectors(tTarget.m_vAngleTo, &vForward);
@@ -356,13 +331,15 @@ int CAimbotMelee::CanHit(Target_t& tTarget, CTFPlayer* pLocal, CTFWeaponBase* pW
 
 		if (bReturn)
 		{
-			tTarget.m_tRecord = tRecord;
-			tTarget.m_bBacktrack = tTarget.m_iTargetType == TargetEnum::Player /*&& Vars::Backtrack::Enabled.Value*/;
+			tTarget.m_pRecord = pRecord;
+			tTarget.m_bBacktrack = tTarget.m_iTargetType == TargetEnum::Player;
 
 			return true;
 		}
-		else if (Vars::Aimbot::General::AimType.Value == Vars::Aimbot::General::AimTypeEnum::Smooth
-			|| Vars::Aimbot::General::AimType.Value == Vars::Aimbot::General::AimTypeEnum::Assistive)
+		else switch (Vars::Aimbot::General::AimType.Value)
+		{
+		case Vars::Aimbot::General::AimTypeEnum::Smooth:
+		case Vars::Aimbot::General::AimTypeEnum::Assistive:
 		{
 			auto vAngle = Math::CalcAngle(vEyePos, tTarget.m_vPos);
 
@@ -372,6 +349,7 @@ int CAimbotMelee::CanHit(Target_t& tTarget, CTFPlayer* pLocal, CTFWeaponBase* pW
 			SDK::Trace(vEyePos, vTraceEnd, MASK_SHOT | CONTENTS_GRATE, &filter, &trace);
 			if (trace.m_pEnt && trace.m_pEnt == tTarget.m_pEntity)
 				return 2;
+		}
 		}
 	}
 
@@ -450,9 +428,10 @@ void CAimbotMelee::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd
 	else if (iAimType)
 		Vars::Aimbot::General::AimType.Value = iAimType;
 
-	if (!F::Aimbot.m_bRunningSecondary && Vars::Aimbot::General::AimHoldsFire.Value == Vars::Aimbot::General::AimHoldsFireEnum::Always && !G::CanPrimaryAttack && G::LastUserCmd->buttons & IN_ATTACK && Vars::Aimbot::General::AimType.Value)
+	if (F::AimbotGlobal.ShouldHoldAttack(pWeapon))
 		pCmd->buttons |= IN_ATTACK;
-	if (!Vars::Aimbot::General::AimType.Value || Vars::Aimbot::General::AimType.Value == Vars::Aimbot::General::AimTypeEnum::Silent && !G::CanPrimaryAttack && pWeapon->m_flSmackTime() < 0.f)
+	if (!Vars::Aimbot::General::AimType.Value
+		|| !F::AimbotGlobal.ShouldAim() && pWeapon->m_flSmackTime() < 0.f)
 		return;
 
 	if (RunSapper(pLocal, pWeapon, pCmd))
@@ -466,16 +445,16 @@ void CAimbotMelee::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd
 	const bool bShouldSwing = iDoubletapTicks <= (GetSwingTime(pWeapon) ? 14 : 0) || Vars::Doubletap::AntiWarp.Value && pLocal->m_hGroundEntity();
 
 	Vec3 vEyePos = pLocal->GetShootPos();
-	std::unordered_map<int, std::deque<TickRecord>> pRecordMap;
-	std::unordered_map<int, std::deque<Vec3>> mPaths;
-	SimulatePlayers(pLocal, pWeapon, vTargets, vEyePos, pRecordMap, mPaths);
+	std::unordered_map<int, std::deque<TickRecord>> mRecordMap;
+	std::unordered_map<int, std::vector<Vec3>> mPaths;
+	SimulatePlayers(pLocal, pWeapon, vTargets, vEyePos, mRecordMap, mPaths);
 
 	//if (!G::AimTarget.m_iEntIndex)
 	//	G::AimTarget = { vTargets.front().m_pEntity->entindex(), I::GlobalVars->tickcount, 0 };
 
 	for (auto& tTarget : vTargets)
 	{
-		const auto iResult = CanHit(tTarget, pLocal, pWeapon, vEyePos, pRecordMap[tTarget.m_pEntity->entindex()]);
+		const auto iResult = CanHit(tTarget, pLocal, pWeapon, vEyePos, mRecordMap[tTarget.m_pEntity->entindex()]);
 		if (!iResult) continue;
 		if (iResult == 2)
 		{
@@ -500,7 +479,7 @@ void CAimbotMelee::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd
 		if (G::Attacking == 1)
 		{
 			if (tTarget.m_bBacktrack)
-				pCmd->tick_count = TIME_TO_TICKS(tTarget.m_tRecord.m_flSimTime) + TIME_TO_TICKS(F::Backtrack.GetFakeInterp());
+				pCmd->tick_count = TIME_TO_TICKS(tTarget.m_pRecord->m_flSimTime) + TIME_TO_TICKS(F::Backtrack.GetFakeInterp());
 			// bug: fast old records seem to be progressively more unreliable ?
 		}
 		else
@@ -550,13 +529,13 @@ void CAimbotMelee::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd
 			}
 			if (bBoxes)
 			{
-				auto vBoxes = F::Visuals.GetHitboxes(tTarget.m_tRecord.m_BoneMatrix.m_aBones, tTarget.m_pEntity->As<CBaseAnimating>());
+				auto vBoxes = F::Visuals.GetHitboxes(tTarget.m_pRecord->m_BoneMatrix.m_aBones, tTarget.m_pEntity->As<CBaseAnimating>());
 				G::BoxStorage.insert(G::BoxStorage.end(), vBoxes.begin(), vBoxes.end());
 
 				//if (Vars::Colors::BoneHitboxEdge.Value.a || Vars::Colors::BoneHitboxFace.Value.a)
-				//	G::BoxStorage.emplace_back(tTarget.m_tRecord.m_vOrigin, tTarget.m_tRecord.m_vMins, tTarget.m_tRecord.m_vMaxs, Vec3(), I::GlobalVars->curtime + Vars::Visuals::Hitbox::DrawDuration.Value, Vars::Colors::BoneHitboxEdge.Value, Vars::Colors::BoneHitboxFace.Value);
+				//	G::BoxStorage.emplace_back(tTarget.m_pRecord->m_vOrigin, tTarget.m_pRecord->m_vMins, tTarget.m_pRecord->m_vMaxs, Vec3(), I::GlobalVars->curtime + Vars::Visuals::Hitbox::DrawDuration.Value, Vars::Colors::BoneHitboxEdge.Value, Vars::Colors::BoneHitboxFace.Value);
 				//if (Vars::Colors::BoneHitboxEdgeClipped.Value.a || Vars::Colors::BoneHitboxFaceClipped.Value.a)
-				//	G::BoxStorage.emplace_back(tTarget.m_tRecord.m_vOrigin, tTarget.m_tRecord.m_vMins, tTarget.m_tRecord.m_vMaxs, Vec3(), I::GlobalVars->curtime + Vars::Visuals::Hitbox::DrawDuration.Value, Vars::Colors::BoneHitboxEdgeClipped.Value, Vars::Colors::BoneHitboxFaceClipped.Value, true);
+				//	G::BoxStorage.emplace_back(tTarget.m_pRecord->m_vOrigin, tTarget.m_pRecord->m_vMins, tTarget.m_pRecord->m_vMaxs, Vec3(), I::GlobalVars->curtime + Vars::Visuals::Hitbox::DrawDuration.Value, Vars::Colors::BoneHitboxEdgeClipped.Value, Vars::Colors::BoneHitboxFaceClipped.Value, true);
 			}
 		}
 
@@ -640,9 +619,14 @@ bool CAimbotMelee::RunSapper(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd
 	{
 		static int iLastRun = 0;
 
-		bool bShouldAim = (Vars::Aimbot::General::AimType.Value == Vars::Aimbot::General::AimTypeEnum::Silent ? iLastRun != I::GlobalVars->tickcount - 1 || G::PSilentAngles && !F::Ticks.CanChoke() : true) && Vars::Aimbot::General::AutoShoot.Value;
-		pCmd->buttons |= IN_ATTACK;
-
+		bool bShouldAim = true;
+		if (Vars::Aimbot::General::AutoShoot.Value)
+			pCmd->buttons |= IN_ATTACK;
+		else
+			bShouldAim = pCmd->buttons & IN_ATTACK;
+		if (Vars::Aimbot::General::AimType.Value == Vars::Aimbot::General::AimTypeEnum::Silent)
+			bShouldAim = bShouldAim && (iLastRun != I::GlobalVars->tickcount - 1 || G::PSilentAngles && !F::Ticks.CanChoke());
+		
 		if (bShouldAim)
 		{
 			G::AimTarget = { tTarget.m_pEntity->entindex(), I::GlobalVars->tickcount };
